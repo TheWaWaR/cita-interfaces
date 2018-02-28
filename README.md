@@ -1,2 +1,3 @@
-# cita-interfaces
-Interface Specifications inside CITA
+# CITA Interfaces
+
+CITA RPC specifications and tests.
