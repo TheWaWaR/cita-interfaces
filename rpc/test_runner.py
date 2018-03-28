@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import os
+import sys
 import json
 import copy
 import argparse
@@ -14,26 +15,36 @@ DEFAULT_RPC_URL = 'http://127.0.0.1:1337'
 
 
 class FixResolver(jsonschema.RefResolver):
-    def __init__(self, schema_data, schema_path):
+    def __init__(self, schema_data, schema_base_uri):
         super(FixResolver, self).__init__(
-            base_uri=schema_path,
+            base_uri=schema_base_uri,
             referrer=None
         )
-        self.store[schema_path] = schema_data
+        self.store[schema_base_uri] = schema_data
 
 
 class TestRunner(object):
 
-    def __init__(self, directory, rpc_url):
-        directory = directory or ''
-        self.directory = directory
-        self.tests_dir = os.path.join(directory, 'tests')
+    def __init__(self, rpc_url, fast_fail):
         self.rpc_url = rpc_url
+        self.fast_fail = fast_fail
         self.session = requests.Session()
+        self.assertion_fail_count = 0
 
-    def run_all(self):
-        for filename in os.listdir(self.tests_dir):
-            test_path = os.path.join(self.tests_dir, filename)
+    def assertion_fail(self, force=False):
+        if self.assertion_fail_count and (force or self.fast_fail):
+            print('>> Assertion Failed {}!!!'.format(
+                '' if self.fast_fail else '({} times)'.format(
+                    self.assertion_fail_count
+                )
+            ))
+            sys.exit(-1)
+
+    def run_all(self, directory):
+        directory = directory or ''
+        tests_dir = os.path.join(directory, 'tests')
+        for filename in os.listdir(tests_dir):
+            test_path = os.path.join(tests_dir, filename)
             self.run_method(test_path)
 
     def run_method(self, test_path):
@@ -41,18 +52,19 @@ class TestRunner(object):
             test_data = json.load(f)
 
         tests_dir = os.path.dirname(test_path)
-        print('Test Method: {}'.format(test_data['title']))
+        print('[Test Method]: {}'.format(test_data['title']))
         schema_path = os.path.join(tests_dir, test_data['schema']['$ref'])
         with open(schema_path) as f:
             schema_data = json.load(f)
 
-        for test_case in test_data['tests']:
+        for i, test_case in enumerate(test_data['tests']):
             self.run_test_case(
                 test_case,
                 schema_data['request'],
                 schema_data['response'],
                 schema_path,
             )
+        print('=' * 60)
 
     def run_test_case(
             self,
@@ -61,7 +73,7 @@ class TestRunner(object):
             response_schema,
             schema_path
     ):
-        print('Test Case: {}'.format(test_case['title']))
+        print('  * [Test Case]: {}'.format(test_case['title']))
         schema_base_uri = 'file://{}/'.format(
             os.path.dirname(os.path.abspath(schema_path))
         )
@@ -71,12 +83,16 @@ class TestRunner(object):
             'method': test_case['request']['method'],
             'params': test_case['request']['params'],
         }
-        request_resolver = FixResolver(request_schema, schema_base_uri)
-        jsonschema.validate(
-            request_payload,
-            request_schema,
-            resolver=request_resolver,
+        request_should_fail_schema = test_case['request'].get(
+            'shouldFailSchema', False
         )
+        if not request_should_fail_schema:
+            request_resolver = FixResolver(request_schema, schema_base_uri)
+            jsonschema.validate(
+                request_payload,
+                request_schema,
+                resolver=request_resolver,
+            )
 
         expected_response = copy.deepcopy(test_case['expectedResponse'])
         expected_response['jsonrpc'] = "2.0"
@@ -97,16 +113,20 @@ class TestRunner(object):
             assertion_result = jq(assertion['program']).transform(
                 assert_data
             )
-            print("{} : {}".format(
+            print("    - [Assertion]: {} => {}".format(
                 assertion['description'],
                 assertion_result
             ))
+            if assertion_result is False:
+                self.assertion_fail_count += 1
+            self.assertion_fail()
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         '--rpc-url',
+        metavar='URL',
         default=DEFAULT_RPC_URL,
         help=u'JSONRPC server URL [default: {}]'.format(DEFAULT_RPC_URL)
     )
@@ -116,17 +136,28 @@ def main():
     )
     parser.add_argument(
         '--tests',
+        metavar='PATH',
         nargs='*',
         help=u'The test file path list'
     )
+    parser.add_argument(
+        '--fast-fail',
+        action='store_true',
+        help=u'Shall we stop when an assertion failed [default: false]'
+    )
     args = parser.parse_args()
 
-    runner = TestRunner(args.directory, args.rpc_url)
+    runner = TestRunner(args.rpc_url, args.fast_fail)
     if args.tests:
         for test_path in args.tests:
             runner.run_method(test_path)
     else:
-        runner.run_all()
+        runner.run_all(args.directory)
+
+    if runner.assertion_fail_count:
+        runner.assertion_fail(force=True)
+    else:
+        print('>>> All tests run successfully!')
 
 
 if __name__ == '__main__':
